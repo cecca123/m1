@@ -28,16 +28,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $stationId = (int)$_POST['station_id'];
             $state = 'reported';
 
-            // Create malfunction record
-            $sql = "INSERT INTO Malfunctions (description, state) VALUES (:description, :state)";
-            $stmt = $conn->prepare($sql);
-            $stmt->bindValue(':description', $description, PDO::PARAM_STR);
-            $stmt->bindValue(':state', $state, PDO::PARAM_STR);
+            try {
+                // Start transaction
+                $conn->beginTransaction();
 
-            if ($stmt->execute()) {
-                setFlashMessage('success', 'Malfunction reported successfully.');
-            } else {
-                setFlashMessage('error', 'Error reporting malfunction.');
+                // First create a report
+                $sql = "INSERT INTO Reports (operator_id) VALUES (1)"; // Using default operator_id 1
+                $stmt = $conn->prepare($sql);
+                $stmt->execute();
+                
+                $reportId = $conn->lastInsertId();
+
+                // Then create malfunction record
+                $sql = "INSERT INTO Malfunctions (description, state, report_id) VALUES (:description, :state, :report_id)";
+                $stmt = $conn->prepare($sql);
+                $stmt->bindValue(':description', $description, PDO::PARAM_STR);
+                $stmt->bindValue(':state', $state, PDO::PARAM_STR);
+                $stmt->bindValue(':report_id', $reportId, PDO::PARAM_INT);
+
+                if ($stmt->execute()) {
+                    $conn->commit();
+                    setFlashMessage('success', 'Malfunction reported successfully.');
+                } else {
+                    $conn->rollBack();
+                    setFlashMessage('error', 'Error reporting malfunction.');
+                }
+            } catch (Exception $e) {
+                $conn->rollBack();
+                setFlashMessage('error', 'Database error: ' . $e->getMessage());
             }
             break;
 
@@ -81,17 +99,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 $stationsStmt = $conn->query("SELECT * FROM Stations ORDER BY station_id");
 $stations = $stationsStmt->fetchAll(PDO::FETCH_ASSOC);
 
-// Get malfunctions list
+// Get malfunctions list with proper JOIN statements
 $malfunctionsQuery = "
-    SELECT m.*, s.address_street, s.address_city
-FROM Malfunctions m
-JOIN Reports r ON m.report_id = r.report_id
-JOIN Admins a ON a.admin_id = r.admin_id
-JOIN Users u ON a.user_id = u.user_id
-JOIN Chargings c ON u.user_id = c.user_id
-JOIN Charging_Points cp ON c.charging_point_id = cp.charging_point_id
-JOIN Stations s ON cp.station_id = s.station_id
-ORDER BY m.malfunction_id DESC;
+    SELECT m.*, s.address_street, s.address_city, r.report_id
+    FROM Malfunctions m
+    JOIN Reports r ON m.report_id = r.report_id
+    LEFT JOIN Stations s ON s.station_id = (
+        SELECT cp.station_id 
+        FROM Charging_Points cp 
+        WHERE cp.charging_point_id = (
+            SELECT MIN(charging_point_id) 
+            FROM Charging_Points 
+            WHERE station_id = s.station_id
+        )
+        LIMIT 1
+    )
+    ORDER BY m.malfunction_id DESC
 ";
 
 $malfunctions = $conn->query($malfunctionsQuery)->fetchAll(PDO::FETCH_ASSOC);
@@ -187,7 +210,7 @@ require_once dirname(__DIR__) . '/includes/header.php';
         <div class="modal-content">
             <div class="modal-header">
                 <h5 class="modal-title">Report Malfunction</h5>
-                
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
             <form method="POST">
                 <input type="hidden" name="csrf_token" value="<?= $csrfToken ?>">
@@ -228,7 +251,7 @@ require_once dirname(__DIR__) . '/includes/header.php';
         <div class="modal-content">
             <div class="modal-header">
                 <h5 class="modal-title">Update Malfunction</h5>
-                
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
             <form method="POST">
                 <input type="hidden" name="csrf_token" value="<?= $csrfToken ?>">
